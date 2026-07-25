@@ -24,6 +24,8 @@ const unitsInput = document.querySelector('#units');
 const speedInput = document.querySelector('#speed');
 const blueStrategyInput = document.querySelector('#blue-strategy');
 const redStrategyInput = document.querySelector('#red-strategy');
+const blueFireModeInput = document.querySelector('#blue-fire-mode');
+const redFireModeInput = document.querySelector('#red-fire-mode');
 const unitsValue = document.querySelector('#units-value');
 const speedValue = document.querySelector('#speed-value');
 const pauseButton = document.querySelector('#pause');
@@ -275,7 +277,8 @@ function resetBattle() {
     blue: blueStrategyInput.value,
     red: redStrategyInput.value,
     units: Number(unitsInput.value),
-    seed: battleSeed
+    seed: battleSeed,
+    fireModes: [blueFireModeInput.value, redFireModeInput.value]
   });
   units = coreBattle.units;
   unitCount = units.length;
@@ -992,6 +995,12 @@ speedInput.addEventListener('input', () => {
 });
 blueStrategyInput.addEventListener('change', () => changeStrategy(0, blueStrategyInput.value));
 redStrategyInput.addEventListener('change', () => changeStrategy(1, redStrategyInput.value));
+blueFireModeInput.addEventListener('change', () => {
+  coreBattle?.setFireMode(0, blueFireModeInput.value);
+});
+redFireModeInput.addEventListener('change', () => {
+  coreBattle?.setFireMode(1, redFireModeInput.value);
+});
 pauseButton.addEventListener('click', () => {
   paused = !paused;
   pauseButton.textContent = paused ? 'Продолжить' : 'Пауза';

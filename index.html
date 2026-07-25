@@ -52,6 +52,7 @@
             <option value="neural">Нейрокомандир (старый)</option>
             <option value="ppo">PPO-командир (GRU)</option>
             <option value="commander_v3">Командир V3 (Attention)</option>
+            <option value="commander_v4">Командир V4 (League + Monte Carlo)</option>
           </select>
         </label>
         <label class="strategy-field red-strategy">
@@ -64,6 +65,25 @@
             <option value="neural">Нейрокомандир (старый)</option>
             <option value="ppo">PPO-командир (GRU)</option>
             <option value="commander_v3">Командир V3 (Attention)</option>
+            <option value="commander_v4">Командир V4 (League + Monte Carlo)</option>
+          </select>
+        </label>
+        <label class="strategy-field">
+          <span>Огонь синих лучников</span>
+          <select id="blue-fire-mode">
+            <option value="auto" selected>Решает командир</option>
+            <option value="independent">Вразнобой по готовности</option>
+            <option value="volley">Залпами по сигналу</option>
+            <option value="hold_fire">Не стрелять</option>
+          </select>
+        </label>
+        <label class="strategy-field">
+          <span>Огонь красных лучников</span>
+          <select id="red-fire-mode">
+            <option value="auto" selected>Решает командир</option>
+            <option value="independent">Вразнобой по готовности</option>
+            <option value="volley">Залпами по сигналу</option>
+            <option value="hold_fire">Не стрелять</option>
           </select>
         </label>
         <button id="pause" type="button">Пауза</button>

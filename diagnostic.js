@@ -23,6 +23,18 @@ import {
   mixedDistribution
 } from './commander-v3-policy.js';
 import { TRAINED_COMMANDER_V3_POLICY } from './trained-commander-v3-policy.js';
+import {
+  V4_DOCTRINES,
+  V4_FIRE_MODES,
+  V4_FOCUS_SECTORS,
+  V4_MEMORY,
+  chooseV4,
+  createV4Policy,
+  evaluateV4,
+  isCompatibleV4Policy,
+  v4Distribution
+} from './commander-v4-policy.js';
+import { TRAINED_COMMANDER_V4_POLICY } from './trained-commander-v4-policy.js';
 
 // Shared deterministic CPU simulation core and headless diagnostic runner.
 const isNodeRuntime = typeof process !== 'undefined' && Boolean(process.versions?.node);
@@ -45,7 +57,10 @@ const GRID_D = Math.ceil(WORLD_D / CELL);
 const DT = 1 / 30;
 const MAX_TIME = 240;
 const ROLES = ['line', 'line', 'line', 'archer', 'reserve', 'flank'];
-const STRATEGIES = ['crowd', 'offensive', 'defensive', 'adaptive', 'neural', 'ppo', 'commander_v3'];
+const STRATEGIES = [
+  'crowd', 'offensive', 'defensive', 'adaptive',
+  'neural', 'ppo', 'commander_v3', 'commander_v4'
+];
 const STRATEGY_NAMES = {
   crowd: 'Без командования',
   offensive: 'Наступательная',
@@ -53,7 +68,8 @@ const STRATEGY_NAMES = {
   adaptive: 'Адаптивная',
   neural: 'Нейрокомандир (старый)',
   ppo: 'PPO-командир',
-  commander_v3: 'Командир V3'
+  commander_v3: 'Командир V3',
+  commander_v4: 'Командир V4'
 };
 
 function parseArgs(argv) {
@@ -64,6 +80,8 @@ function parseArgs(argv) {
     trials: 20,
     seed: 1,
     workers: cpuParallelism,
+    blueFire: 'auto',
+    redFire: 'auto',
     matrix: false,
     json: false
   };
@@ -77,6 +95,8 @@ function parseArgs(argv) {
     else if (arg === '--trials') result.trials = Number(argv[++i]);
     else if (arg === '--seed') result.seed = Number(argv[++i]);
     else if (arg === '--workers') result.workers = Number(argv[++i]);
+    else if (arg === '--blue-fire') result.blueFire = argv[++i];
+    else if (arg === '--red-fire') result.redFire = argv[++i];
   }
   if (!STRATEGIES.includes(result.blue) || !STRATEGIES.includes(result.red)) {
     throw new Error(`Стратегии: ${STRATEGIES.join(', ')}`);
@@ -151,6 +171,7 @@ function createDisposition(team, rand) {
       targetRegiment: 0,
       pace: 0.88 + rand() * 0.24,
       mission: 'advance',
+      fireMode: 'independent',
       flankSign: rand() < 0.5 ? -1 : 1,
       formationCenterX: 0,
       initialCount: 0
@@ -166,12 +187,17 @@ function createCommander(team, mode, policy = null, training = null) {
       ? (isCompatibleV3Policy(TRAINED_COMMANDER_V3_POLICY)
         ? TRAINED_COMMANDER_V3_POLICY
         : createV3Policy())
+      : mode === 'commander_v4'
+        ? (isCompatibleV4Policy(TRAINED_COMMANDER_V4_POLICY)
+          ? TRAINED_COMMANDER_V4_POLICY
+          : createV4Policy())
       : TRAINED_POLICY;
   return {
     team,
     mode,
     nextDecision: 0,
     nextVolley: SHOT_CADENCE,
+    volleyStart: -1,
     volleyUntil: -1,
     volleyId: 0,
     tactic: mode,
@@ -179,6 +205,7 @@ function createCommander(team, mode, policy = null, training = null) {
     policyOutputs: null,
     recurrentState: Array.from({ length: REGIMENTS }, () => new Array(PPO_MEMORY).fill(0)),
     v3Hidden: new Array(V3_MEMORY).fill(0),
+    v4Hidden: new Array(V4_MEMORY).fill(0),
     training,
     decisions: {}
   };
@@ -253,7 +280,15 @@ function finalizeV3Records(records, terminalReward) {
 }
 
 export class Battle {
-  constructor({ blue, red, units, seed, policies = [], training = [] }) {
+  constructor({
+    blue,
+    red,
+    units,
+    seed,
+    policies = [],
+    training = [],
+    fireModes = []
+  }) {
     this.unitsPerArmy = units;
     this.rand = makeRng(seed);
     this.units = [];
@@ -266,6 +301,8 @@ export class Battle {
       createCommander(0, blue, policies[0], training[0]),
       createCommander(1, red, policies[1], training[1])
     ];
+    this.commanders[0].fireModeOverride = fireModes[0] ?? 'auto';
+    this.commanders[1].fireModeOverride = fireModes[1] ?? 'auto';
     this.trainingRecords = [[], []];
     this.metrics = [
       { arrows: 0, hits: 0, meleeHits: 0, kills: 0, decisions: 0 },
@@ -328,6 +365,7 @@ export class Battle {
             alive: true,
             fall: 0,
             lastVolley: -1,
+            volleyDelay: this.rand() * 0.55,
             phase: this.rand() * Math.PI * 2
           });
           offsetSumX += offsetX;
@@ -444,7 +482,11 @@ export class Battle {
       flank: ['hold', 'advance', 'assault', 'flank']
     };
     const processingOrder = [0, 1, 2, 5, 4, 3];
-    const forcePursuit = (commander.mode === 'ppo' || commander.mode === 'commander_v3')
+    const forcePursuit = (
+      commander.mode === 'ppo'
+      || commander.mode === 'commander_v3'
+      || commander.mode === 'commander_v4'
+    )
       && (this.time >= 120 || (
         this.time >= 45
         && this.time - this.lastKillTime >= 18
@@ -484,6 +526,178 @@ export class Battle {
       }
       return features;
     };
+
+    if (commander.mode === 'commander_v4') {
+      const activeMask = ownState.map(state => state.count > 0);
+      const activeRegimentRatio = activeMask.filter(Boolean).length / Math.max(1, activeMask.length);
+      const regimentFeatures = ownState.map((state, regiment) => {
+        if (!state.count) return new Array(48).fill(0);
+        const legacy = makeFeatures(regiment);
+        const role = this.plans[team][regiment].role;
+        return [
+          ...legacy.slice(0, 10),
+          ...['line', 'archer', 'reserve', 'flank'].map(candidate => candidate === role ? 1 : 0),
+          regiment / Math.max(1, ownState.length - 1) * 2 - 1,
+          activeRegimentRatio,
+          ...legacy.slice(16)
+        ];
+      });
+      const previousHidden = commander.v4Hidden;
+      const network = evaluateV4(regimentFeatures, activeMask, previousHidden, commander.policy);
+      commander.v4Hidden = network.hidden;
+      const exploration = commander.training?.sample
+        ? Math.max(0, Math.min(0.4, commander.training.exploration ?? 0.1))
+        : 0;
+      const doctrineProbabilities = v4Distribution(network.doctrines, exploration);
+      const focusProbabilities = v4Distribution(network.focus, exploration);
+      const fireProbabilities = v4Distribution(network.fire, exploration);
+      const samplingRng = commander.training?.sample ? this.rand : null;
+      let doctrineIndex = chooseV4(doctrineProbabilities, samplingRng);
+      let focusSector = chooseV4(focusProbabilities, samplingRng);
+      let fireModeIndex = chooseV4(fireProbabilities, samplingRng);
+      if (Number.isInteger(commander.training?.forcedDoctrine)) {
+        doctrineIndex = Math.max(
+          0,
+          Math.min(V4_DOCTRINES.length - 1, commander.training.forcedDoctrine)
+        );
+      }
+      if (Number.isInteger(commander.training?.forcedFocus)) {
+        focusSector = Math.max(
+          0,
+          Math.min(V4_FOCUS_SECTORS - 1, commander.training.forcedFocus)
+        );
+      }
+      if (Number.isInteger(commander.training?.forcedFire)) {
+        fireModeIndex = Math.max(
+          0,
+          Math.min(V4_FIRE_MODES.length - 1, commander.training.forcedFire)
+        );
+      }
+      if (
+        commander.fireModeOverride
+        && commander.fireModeOverride !== 'auto'
+        && V4_FIRE_MODES.includes(commander.fireModeOverride)
+      ) {
+        fireModeIndex = V4_FIRE_MODES.indexOf(commander.fireModeOverride);
+      }
+      if (forcePursuit) {
+        doctrineIndex = V4_DOCTRINES.indexOf('mass_assault');
+        fireModeIndex = V4_FIRE_MODES.indexOf('independent');
+      }
+      const doctrine = V4_DOCTRINES[doctrineIndex];
+      const fireMode = V4_FIRE_MODES[fireModeIndex];
+      if (doctrine === 'left_hook') focusSector = 1;
+      else if (doctrine === 'right_hook') focusSector = 5;
+      const lineRegiments = this.plans[team]
+        .map((plan, regiment) => ({ plan, regiment }))
+        .filter(item => item.plan.role === 'line')
+        .map(item => item.regiment);
+
+      for (let regiment = 0; regiment < REGIMENTS; regiment++) {
+        const own = ownState[regiment];
+        if (!own.count) continue;
+        const plan = this.plans[team][regiment];
+        if (plan.role === 'archer') plan.fireMode = fireMode;
+        let targetSector = focusSector;
+        let stance = 'hold';
+        if (doctrine === 'mass_advance') {
+          stance = plan.role === 'archer' ? 'hold' : 'advance';
+        } else if (doctrine === 'mass_assault') {
+          stance = plan.role === 'archer' ? 'advance' : 'assault';
+        } else if (doctrine === 'elastic') {
+          if (plan.role === 'line') {
+            const lineIndex = lineRegiments.indexOf(regiment);
+            targetSector = Math.max(0, Math.min(6, focusSector + lineIndex - 1));
+          } else if (plan.role === 'reserve') {
+            stance = 'reserve';
+          } else if (plan.role === 'flank') {
+            targetSector = plan.homeZ < 0 ? 1 : 5;
+          }
+        } else if (doctrine === 'left_hook' || doctrine === 'right_hook') {
+          stance = plan.role === 'archer'
+            ? 'hold'
+            : plan.role === 'flank' ? 'flank' : plan.role === 'reserve' ? 'assault' : 'advance';
+        } else if (doctrine === 'counterattack') {
+          stance = closestDistance < 210
+            ? (plan.role === 'archer' ? 'advance' : 'assault')
+            : plan.role === 'reserve' ? 'reserve' : 'hold';
+        } else if (doctrine === 'encircle') {
+          if (plan.role === 'flank') {
+            stance = 'flank';
+            targetSector = plan.homeZ < 0 ? 0 : 6;
+          } else if (plan.role === 'reserve') {
+            stance = closestDistance < 250 ? 'assault' : 'reserve';
+          } else {
+            stance = 'hold';
+          }
+        }
+
+        let targetRegiment = 0;
+        let targetDistance = Infinity;
+        for (let enemyRegiment = 0; enemyRegiment < REGIMENTS; enemyRegiment++) {
+          const enemy = enemyState[enemyRegiment];
+          if (!enemy.count) continue;
+          const distance = forcePursuit
+            ? Math.hypot(enemy.x - own.x, enemy.z - own.z)
+            : Math.abs(enemy.z - sectorCenter(targetSector));
+          if (distance < targetDistance) {
+            targetDistance = distance;
+            targetRegiment = enemyRegiment;
+          }
+        }
+        if (forcePursuit && enemyState[targetRegiment]?.count) {
+          targetSector = sectorIndex(enemyState[targetRegiment].z);
+        }
+        orders[regiment] = { stance, targetSector, targetRegiment, score: 0 };
+      }
+      commander.decisions[doctrine] = (commander.decisions[doctrine] ?? 0) + 1;
+      commander.currentDoctrine = doctrine;
+      commander.currentFireMode = fireMode;
+      if (commander.training?.record) {
+        let isolatedEngagements = 0;
+        let engagedRegiments = 0;
+        for (let regiment = 0; regiment < REGIMENTS; regiment++) {
+          const own = ownState[regiment];
+          if (!own.count || this.plans[team][regiment].role === 'archer') continue;
+          const enemyDistance = enemyState
+            .filter(state => state.count)
+            .reduce(
+              (best, state) => Math.min(best, Math.hypot(state.x - own.x, state.z - own.z)),
+              Infinity
+            );
+          if (enemyDistance >= 145) continue;
+          engagedRegiments++;
+          const supported = ownState.some((ally, allyRegiment) =>
+            allyRegiment !== regiment
+            && ally.count
+            && this.plans[team][allyRegiment].role !== 'archer'
+            && Math.hypot(ally.x - own.x, ally.z - own.z) < 190
+          );
+          if (!supported) isolatedEngagements++;
+        }
+        const isolationRatio = isolatedEngagements / Math.max(1, engagedRegiments);
+        this.trainingRecords[team].push({
+          kind: 'commander_v4',
+          time: this.time,
+          features: regimentFeatures,
+          activeMask,
+          hidden: previousHidden.slice(),
+          doctrine: doctrineIndex,
+          focus: focusSector,
+          fireMode: fireModeIndex,
+          doctrineLogProb: Math.log(Math.max(1e-9, doctrineProbabilities[doctrineIndex])),
+          focusLogProb: Math.log(Math.max(1e-9, focusProbabilities[focusSector])),
+          fireLogProb: Math.log(Math.max(1e-9, fireProbabilities[fireModeIndex])),
+          logProb: Math.log(Math.max(1e-9, doctrineProbabilities[doctrineIndex]))
+            + Math.log(Math.max(1e-9, focusProbabilities[focusSector]))
+            + Math.log(Math.max(1e-9, fireProbabilities[fireModeIndex])),
+          value: network.value,
+          potential: (alive - enemyAlive) / Math.max(1, this.unitsPerArmy)
+            - isolationRatio * 0.12
+        });
+      }
+      return orders;
+    }
 
     if (commander.mode === 'commander_v3') {
       const activeMask = ownState.map(state => state.count > 0);
@@ -758,6 +972,7 @@ export class Battle {
       commander.mode === 'neural'
       || commander.mode === 'ppo'
       || commander.mode === 'commander_v3'
+      || commander.mode === 'commander_v4'
         ? 4
         : 8
     );
@@ -811,7 +1026,12 @@ export class Battle {
       doctrine = relativeStrength < 0.92 || (closestDistance < 190 && relativeStrength < 1.08)
         ? 'defensive'
         : 'offensive';
-    } else if (doctrine === 'neural' || doctrine === 'ppo' || doctrine === 'commander_v3') {
+    } else if (
+      doctrine === 'neural'
+      || doctrine === 'ppo'
+      || doctrine === 'commander_v3'
+      || doctrine === 'commander_v4'
+    ) {
       neuralOrders = this.createNeuralOrders(
         team,
         ownState,
@@ -821,7 +1041,9 @@ export class Battle {
         closestDistance,
         commander
       );
-      doctrine = commander.mode === 'commander_v3'
+      doctrine = commander.mode === 'commander_v4'
+        ? 'commander_v4_detail'
+        : commander.mode === 'commander_v3'
         ? 'commander_v3_detail'
         : commander.mode === 'ppo' ? 'ppo_detail' : 'neural_detail';
     }
@@ -838,8 +1060,17 @@ export class Battle {
             ? commander.pursuit
               ? `V3 ATTENTION: ПРЕСЛЕДОВАНИЕ`
               : `V3 ATTENTION: СОВМЕСТНЫЙ ПЛАН`
+            : commander.mode === 'commander_v4'
+              ? commander.pursuit
+                ? `V4 LEAGUE: ПРЕСЛЕДОВАНИЕ`
+                : `V4 LEAGUE: ${String(commander.currentDoctrine ?? 'PLAN').toUpperCase()}`
         : doctrine === 'offensive' ? 'НАСТУПЛЕНИЕ ПО РОЛЯМ' : 'ЭШЕЛОНИРОВАННАЯ ОБОРОНА';
-    if (commander.mode !== 'neural' && commander.mode !== 'ppo' && commander.mode !== 'commander_v3') {
+    if (
+      commander.mode !== 'neural'
+      && commander.mode !== 'ppo'
+      && commander.mode !== 'commander_v3'
+      && commander.mode !== 'commander_v4'
+    ) {
       commander.decisions[doctrine] = (commander.decisions[doctrine] ?? 0) + 1;
     }
 
@@ -926,10 +1157,28 @@ export class Battle {
     this.issueOrders(1, state[1], state[0], alive[1]);
     for (const commander of this.commanders) {
       if (commander.mode === 'crowd') continue;
+      if (
+        commander.fireModeOverride
+        && commander.fireModeOverride !== 'auto'
+        && V4_FIRE_MODES.includes(commander.fireModeOverride)
+      ) {
+        for (const plan of this.plans[commander.team]) {
+          if (plan.role === 'archer') plan.fireMode = commander.fireModeOverride;
+        }
+      }
+      const usesVolley = this.plans[commander.team].some(
+        plan => plan.role === 'archer' && plan.fireMode === 'volley'
+      );
+      if (!usesVolley) {
+        commander.nextVolley = Math.max(commander.nextVolley, this.time + SHOT_CADENCE);
+        commander.volleyUntil = -1;
+        continue;
+      }
       if (this.time >= commander.nextVolley) {
         commander.volleyId++;
+        commander.volleyStart = this.time;
         commander.volleyUntil = this.time + 0.75;
-        commander.nextVolley += SHOT_CADENCE;
+        commander.nextVolley = this.time + SHOT_CADENCE;
       }
     }
   }
@@ -1258,10 +1507,15 @@ export class Battle {
           const target = this.units[rangedIndex];
           const distance = Math.sqrt(rangedD2);
           targetVx = distance < 90 ? -dir * 36 : targetVx * 0.16;
-          const freeFire = commander.mode === 'crowd' && u.cooldown <= 0;
-          const volley = commander.mode !== 'crowd'
+          const fireMode = commander.mode === 'crowd'
+            ? 'independent'
+            : plan.fireMode ?? 'independent';
+          const freeFire = fireMode === 'independent' && u.cooldown <= 0;
+          const volley = fireMode === 'volley'
             && this.time <= commander.volleyUntil
-            && u.lastVolley !== commander.volleyId;
+            && this.time >= commander.volleyStart + u.volleyDelay
+            && u.lastVolley !== commander.volleyId
+            && u.cooldown <= 0;
           if ((freeFire || volley) && distance > 25) {
             this.fireArrow(u, rangedIndex, target);
             u.lastVolley = commander.volleyId;
@@ -1355,6 +1609,21 @@ export class Battle {
     return finalAlive;
   }
 
+  setFireMode(team, mode) {
+    if (!['auto', ...V4_FIRE_MODES].includes(mode)) return;
+    const commander = this.commanders[team];
+    commander.fireModeOverride = mode;
+    if (commander.mode === 'crowd') {
+      commander.fireModeOverride = 'auto';
+      mode = 'independent';
+    }
+    if (mode !== 'auto') {
+      for (const plan of this.plans[team]) {
+        if (plan.role === 'archer') plan.fireMode = mode;
+      }
+    }
+  }
+
   setStrategy(team, mode) {
     const commander = this.commanders[team];
     if (!commander || !STRATEGIES.includes(mode)) return;
@@ -1365,17 +1634,24 @@ export class Battle {
         ? (isCompatibleV3Policy(TRAINED_COMMANDER_V3_POLICY)
           ? TRAINED_COMMANDER_V3_POLICY
           : createV3Policy())
+        : mode === 'commander_v4'
+          ? (isCompatibleV4Policy(TRAINED_COMMANDER_V4_POLICY)
+            ? TRAINED_COMMANDER_V4_POLICY
+            : createV4Policy())
         : TRAINED_POLICY;
     commander.recurrentState = Array.from(
       { length: REGIMENTS },
       () => new Array(PPO_MEMORY).fill(0)
     );
     commander.v3Hidden = new Array(V3_MEMORY).fill(0);
+    commander.v4Hidden = new Array(V4_MEMORY).fill(0);
     commander.nextDecision = this.time;
     commander.nextVolley = this.time + SHOT_CADENCE;
+    commander.volleyStart = -1;
     commander.volleyUntil = -1;
     for (const plan of this.plans[team]) {
       plan.mission = mode === 'crowd' ? 'crowd' : 'advance';
+      plan.fireMode = 'independent';
     }
   }
 
@@ -1399,7 +1675,9 @@ export class Battle {
       metrics: this.metrics,
       commanderDecisions: this.commanders.map(commander => commander.decisions),
       trainingSamples: this.trainingRecords.map((records, team) =>
-        records.some(record => record.kind === 'commander_v3')
+        records.some(record =>
+          record.kind === 'commander_v3' || record.kind === 'commander_v4'
+        )
           ? finalizeV3Records(records, rewards[team])
           : records.some(record => record.kind === 'ppo')
             ? finalizePpoRecords(records, rewards[team])
@@ -1409,7 +1687,9 @@ export class Battle {
   }
 }
 
-function runMatchup({ blue, red, units, trials, seed }) {
+function runMatchup({
+  blue, red, units, trials, seed, blueFire = 'auto', redFire = 'auto'
+}) {
   const summary = {
     blue,
     red,
@@ -1428,7 +1708,13 @@ function runMatchup({ blue, red, units, trials, seed }) {
     redMelee: 0
   };
   for (let trial = 0; trial < trials; trial++) {
-    const battle = new Battle({ blue, red, units, seed: seed + trial * 7919 });
+    const battle = new Battle({
+      blue,
+      red,
+      units,
+      seed: seed + trial * 7919,
+      fireModes: [blueFire, redFire]
+    });
     const result = battle.run();
     if (result.winner === 'blue') summary.blueWins++;
     else if (result.winner === 'red') summary.redWins++;
@@ -1557,6 +1843,9 @@ async function runMatchupParallel(options, pool) {
       units: options.units,
       trials,
       seed: options.seed + trialOffset * 7919
+      ,
+      blueFire: options.blueFire,
+      redFire: options.redFire
     };
     trialOffset += trials;
     jobs.push(pool.run(job));
