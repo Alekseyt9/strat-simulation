@@ -1,0 +1,17 @@
+.venv-gpu/
+.python/
+.uv-cache/
+.training/
+__pycache__/
+*.pyc
+*.log
+.gpu-install.out.log
+.gpu-install.err.log
+.ppo-train.out.log
+.ppo-train.err.log
+.ppo-retrain.out.log
+.ppo-retrain.err.log
+.neural-retrain.out.log
+.neural-retrain.err.log
+.v3-train.out.log
+.v3-train.err.log

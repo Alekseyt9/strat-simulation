@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Масштабная битва 3D</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <main id="app">
+    <canvas id="battlefield" aria-label="Трёхмерная симуляция сражения двух армий"></canvas>
+
+    <header class="hud hud-top">
+      <div class="title-block">
+        <strong>МАСШТАБНАЯ БИТВА</strong>
+        <span>3D · GPU rendering · CPU simulation</span>
+      </div>
+
+      <div class="controls">
+        <label>
+          <span>Юнитов <b id="units-value">600</b> × 2</span>
+          <input id="units" type="range" min="150" max="1200" step="50" value="600">
+        </label>
+        <label>
+          <span>Скорость <b id="speed-value">1×</b></span>
+          <select id="speed">
+            <option value="0.25">0,25×</option>
+            <option value="0.5">0,5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="3">3×</option>
+            <option value="5">5×</option>
+            <option value="10">10×</option>
+            <option value="20">20×</option>
+          </select>
+        </label>
+        <label class="strategy-field blue-strategy">
+          <span>Стратегия синих</span>
+          <select id="blue-strategy">
+            <option value="crowd">Без командования</option>
+            <option value="offensive">Наступательная</option>
+            <option value="defensive">Оборонительная</option>
+            <option value="adaptive" selected>Адаптивная</option>
+            <option value="neural">Нейрокомандир (старый)</option>
+            <option value="ppo">PPO-командир (GRU)</option>
+            <option value="commander_v3">Командир V3 (Attention)</option>
+          </select>
+        </label>
+        <label class="strategy-field red-strategy">
+          <span>Стратегия красных</span>
+          <select id="red-strategy">
+            <option value="crowd">Без командования</option>
+            <option value="offensive">Наступательная</option>
+            <option value="defensive">Оборонительная</option>
+            <option value="adaptive" selected>Адаптивная</option>
+            <option value="neural">Нейрокомандир (старый)</option>
+            <option value="ppo">PPO-командир (GRU)</option>
+            <option value="commander_v3">Командир V3 (Attention)</option>
+          </select>
+        </label>
+        <button id="pause" type="button">Пауза</button>
+        <button id="reset" type="button">Новая битва</button>
+        <button id="camera-reset" type="button">Общий план</button>
+      </div>
+    </header>
+
+    <section class="hud score" aria-live="polite">
+      <div class="army blue">
+        <span class="swatch"></span>
+        <div><small>СИНИЕ</small><strong id="blue-count">600</strong><em id="blue-order">ОБЩЕЕ НАСТУПЛЕНИЕ</em></div>
+      </div>
+      <div class="phase">
+        <strong id="phase">СБЛИЖЕНИЕ</strong>
+        <span id="battle-time">00:00</span>
+      </div>
+      <div class="army red">
+        <div><small>КРАСНЫЕ</small><strong id="red-count">600</strong><em id="red-order">ОБЩЕЕ НАСТУПЛЕНИЕ</em></div>
+        <span class="swatch"></span>
+      </div>
+    </section>
+
+    <aside class="hud help">
+      <strong>СВОБОДНАЯ КАМЕРА</strong>
+      <span><kbd>ЛКМ</kbd> вращение · <kbd>ПКМ</kbd> панорама · колесо — масштаб</span>
+      <span><kbd>WASD</kbd> движение · <kbd>Q/E</kbd> вниз/вверх</span>
+    </aside>
+
+    <footer class="hud legend">
+      <span><i class="unit infantry"></i> пехота</span>
+      <span><i class="unit archer"></i> лучники</span>
+      <span><i class="flag"></i> 3 линейных · лучники · резерв · фланг</span>
+      <span id="fps">60 FPS</span>
+    </footer>
+
+    <div id="loading">
+      <strong>Поднимаем полки…</strong>
+      <span>Загрузка 3D-движка</span>
+    </div>
+  </main>
+
+  <script>
+    window.addEventListener('error', event => {
+      const status = document.querySelector('#loading span');
+      if (status) status.textContent = `Ошибка запуска: ${event.message || 'модуль не загрузился'}`;
+    });
+    window.addEventListener('unhandledrejection', event => {
+      const status = document.querySelector('#loading span');
+      if (status) status.textContent = `Ошибка запуска: ${event.reason?.message || event.reason || 'неизвестная ошибка'}`;
+    });
+  </script>
+  <script id="app-module" type="module" src="./app.js"></script>
+  <script>
+    document.querySelector('#app-module').addEventListener('error', () => {
+      const status = document.querySelector('#loading span');
+      if (status) status.textContent = 'Ошибка запуска: не удалось загрузить модуль симуляции';
+    });
+  </script>
+</body>
+</html>
