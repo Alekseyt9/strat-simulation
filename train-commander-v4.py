@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent
 INPUTS, REGIMENTS = 48, 6
 EMBED, ATTENTION, MEMORY = 64, 32, 64
 DOCTRINES, FOCUS, FIRE, VERSION = 8, 7, 3, 2
-LEAGUE = "crowd,commander_v3,ppo,neural,offensive,defensive,adaptive"
+LEAGUE = "crowd,neural,ppo,commander_v3,commander_v4,offensive,defensive,adaptive"
 
 
 class CommanderV4(nn.Module):

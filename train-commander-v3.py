@@ -24,6 +24,7 @@ SECTORS = 7
 STANCES = 5
 REGIMENTS = 6
 VERSION = 1
+LEAGUE = "crowd,neural,ppo,commander_v3,commander_v4,offensive,defensive,adaptive"
 
 
 class CommanderV3(nn.Module):
@@ -316,7 +317,14 @@ def ppo_update(
 
 
 def validation_score(summary):
-    return (summary["wins"] + summary["draws"] * 0.5) / max(1, summary["battles"])
+    rates = {}
+    for name, bucket in summary.get("byOpponent", {}).items():
+        games = bucket["wins"] + bucket["losses"] + bucket["draws"]
+        rates[name] = (bucket["wins"] + 0.5 * bucket["draws"]) / max(1, games)
+    overall = (summary["wins"] + summary["draws"] * 0.5) / max(1, summary["battles"])
+    crowd = rates.get("crowd", overall)
+    worst = min(rates.values(), default=overall)
+    return 0.5 * overall + 0.3 * crowd + 0.2 * worst
 
 
 def action_share(summary, names):
@@ -337,6 +345,8 @@ def main():
     parser.add_argument("--target-kl", type=float, default=0.018)
     parser.add_argument("--seed", type=int, default=730031)
     parser.add_argument("--node", default="node")
+    parser.add_argument("--opponents", default=LEAGUE)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -345,19 +355,24 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda")
     model = CommanderV3().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-5)
     work = ROOT / ".training"
     work.mkdir(exist_ok=True)
+    checkpoint_path = work / "commander-v3-best.pt"
+    if args.resume and checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-5)
     history = []
     best_score = -1.0
     best_state = copy.deepcopy(model.state_dict())
     started = time.perf_counter()
     exploration = 0.18
-    export_policy(model, {"status": "fresh initialization", "history": []})
+    export_policy(model, {"status": "league baseline", "history": []})
     baseline_path = work / "commander-v3-baseline.json"
     baseline = run_collector(
         args.node, args.validation_battles, args.workers,
-        args.seed + 8_500_000, baseline_path, 0, evaluate=True
+        args.seed + 8_500_000, baseline_path, 0, evaluate=True,
+        opponents=args.opponents
     )["summary"]
     best_score = validation_score(baseline)
     history.append({
@@ -372,7 +387,7 @@ def main():
         "score": best_score,
         "history": history,
         "options": vars(args),
-    }, work / "commander-v3-best.pt")
+    }, checkpoint_path)
     print(
         f"V3 baseline: {baseline['wins']}-{baseline['losses']}-{baseline['draws']} "
         f"score={best_score:.3f}",
@@ -383,7 +398,8 @@ def main():
         rollout_path = work / "commander-v3-rollouts.json"
         rollout = run_collector(
             args.node, args.battles, args.workers,
-            args.seed + cycle * 10007, rollout_path, exploration
+            args.seed + cycle * 10007, rollout_path, exploration,
+            opponents=args.opponents
         )
         entropy_weight = max(0.012, 0.03 * (0.86 ** cycle))
         losses = ppo_update(
@@ -395,7 +411,7 @@ def main():
         validation = run_collector(
             args.node, args.validation_battles, args.workers,
             args.seed + 9_000_000 + cycle * 20011,
-            validation_path, 0, evaluate=True
+            validation_path, 0, evaluate=True, opponents=args.opponents
         )["summary"]
         current_score = validation_score(validation)
         attack_share = action_share(rollout["summary"], ("assault", "flank"))
@@ -421,7 +437,7 @@ def main():
                 "score": best_score,
                 "history": history,
                 "options": vars(args),
-            }, work / "commander-v3-best.pt")
+            }, checkpoint_path)
         exploration = max(0.06, exploration * 0.88)
         if attack_share < 0.08 or validation_attack_share < 0.08:
             exploration = max(exploration, 0.18)

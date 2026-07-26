@@ -21,6 +21,7 @@ MEMORY = 48
 SECTORS = 7
 STANCES = 5
 VERSION = 1
+LEAGUE = "crowd,neural,ppo,commander_v3,commander_v4,offensive,defensive,adaptive"
 
 
 class CommanderActorCritic(nn.Module):
@@ -78,13 +79,17 @@ def export_policy(model: CommanderActorCritic, metadata: dict) -> None:
     (ROOT / "trained-ppo-policy.js").write_text(source, encoding="utf8")
 
 
-def run_collector(node: str, battles: int, workers: int, seed: int, output: Path, evaluate=False):
+def run_collector(
+    node: str, battles: int, workers: int, seed: int, output: Path,
+    evaluate=False, opponents=LEAGUE
+):
     command = [
         node,
         "collect-ppo-rollouts.js",
         "--battles", str(battles),
         "--workers", str(workers),
         "--seed", str(seed),
+        "--opponents", opponents,
         "--output", str(output),
     ]
     if evaluate:
@@ -147,7 +152,14 @@ def ppo_update(model, optimizer, samples, device, epochs, batch_size, clip, entr
 
 
 def score(summary: dict) -> float:
-    return (summary["wins"] + summary["draws"] * 0.5) / max(1, summary["battles"])
+    rates = {}
+    for name, bucket in summary.get("byOpponent", {}).items():
+        games = bucket["wins"] + bucket["losses"] + bucket["draws"]
+        rates[name] = (bucket["wins"] + 0.5 * bucket["draws"]) / max(1, games)
+    overall = (summary["wins"] + summary["draws"] * 0.5) / max(1, summary["battles"])
+    crowd = rates.get("crowd", overall)
+    worst = min(rates.values(), default=overall)
+    return 0.5 * overall + 0.3 * crowd + 0.2 * worst
 
 
 def main() -> None:
@@ -163,6 +175,8 @@ def main() -> None:
     parser.add_argument("--entropy", type=float, default=0.012)
     parser.add_argument("--seed", type=int, default=240726)
     parser.add_argument("--node", default="node")
+    parser.add_argument("--opponents", default=LEAGUE)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -171,19 +185,36 @@ def main() -> None:
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda")
     model = CommanderActorCritic().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-5)
     work = ROOT / ".training"
     work.mkdir(exist_ok=True)
+    checkpoint_path = work / "ppo-best.pt"
+    if args.resume and checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1e-5)
     history = []
-    best_score = -1.0
     best_state = copy.deepcopy(model.state_dict())
     started = time.perf_counter()
+    export_policy(model, {"status": "league baseline", "history": history})
+    baseline, _ = run_collector(
+        args.node, args.validation_battles, args.workers,
+        args.seed + 8_500_000, work / "ppo-league-baseline.json",
+        evaluate=True, opponents=args.opponents
+    )
+    best_score = score(baseline["summary"])
+    history.append({
+        "cycle": 0,
+        "type": "league baseline",
+        "validation": baseline["summary"],
+        "validationScore": best_score,
+    })
 
     for cycle in range(args.cycles):
         export_policy(model, {"status": "collecting", "cycle": cycle, "history": history})
         rollout_path = work / "ppo-rollouts.json"
         payload, _ = run_collector(
-            args.node, args.battles, args.workers, args.seed + cycle * 10007, rollout_path
+            args.node, args.battles, args.workers, args.seed + cycle * 10007,
+            rollout_path, opponents=args.opponents
         )
         losses = ppo_update(
             model, optimizer, payload["samples"], device, args.epochs,
@@ -193,7 +224,8 @@ def main() -> None:
         validation_path = work / "ppo-validation.json"
         validation, _ = run_collector(
             args.node, args.validation_battles, args.workers,
-            args.seed + 9_000_000 + cycle * 20011, validation_path, evaluate=True
+            args.seed + 9_000_000 + cycle * 20011, validation_path,
+            evaluate=True, opponents=args.opponents
         )
         validation_summary = validation["summary"]
         current_score = score(validation_summary)
@@ -214,7 +246,7 @@ def main() -> None:
                 "score": best_score,
                 "history": history,
                 "options": vars(args),
-            }, work / "ppo-best.pt")
+            }, checkpoint_path)
         print(
             f"Цикл {cycle + 1}/{args.cycles}: rollout "
             f"{payload['summary']['wins']}-{payload['summary']['losses']}-{payload['summary']['draws']}, "
