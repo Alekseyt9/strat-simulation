@@ -113,6 +113,9 @@ def train_model(
     model_dir = run_dir / f"round-{round_index + 1}" / model.name
     model_dir.mkdir(parents=True, exist_ok=True)
     base_policy, base_checkpoint = snapshot(model)
+    (model_dir / "baseline-policy.js").write_bytes(base_policy)
+    if base_checkpoint is not None:
+        (model_dir / "baseline-checkpoint.pt").write_bytes(base_checkpoint)
     fixed_seed = seed + round_index * 10_000_000 + MODELS.index(model) * 1_000_000
     baseline = evaluate(
         model, validation_battles, workers, fixed_seed + 900_000,
