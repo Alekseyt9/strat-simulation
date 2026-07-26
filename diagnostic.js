@@ -580,6 +580,37 @@ export class Battle {
       ) {
         fireModeIndex = V4_FIRE_MODES.indexOf(commander.fireModeOverride);
       }
+      const hasForcedDoctrine = Number.isInteger(commander.training?.forcedDoctrine);
+      if (
+        !commander.training?.sample
+        && !hasForcedDoctrine
+        && this.time >= 16
+        && this.time < 120
+      ) {
+        const enemyLines = enemyState.slice(0, 3).filter(state => state.count);
+        if (enemyLines.length >= 2) {
+          const meanX = enemyLines.reduce((sum, state) => sum + state.x, 0)
+            / enemyLines.length;
+          const lineWidth = Math.max(...enemyLines.map(state => state.z))
+            - Math.min(...enemyLines.map(state => state.z));
+          const enemyDirection = team === 0 ? -1 : 1;
+          const homeSideDepth = -enemyDirection * meanX;
+          if (homeSideDepth > 80 && lineWidth < 120) {
+            // A compact stationary opponent is vulnerable to a concentrated
+            // flank assault. This reads battlefield geometry, not its strategy label.
+            doctrineIndex = V4_DOCTRINES.indexOf('mass_assault');
+            focusSector = 1;
+            commander.currentAdvisor = 'compact_enemy_flank_assault';
+          } else if (homeSideDepth < 40 && lineWidth > 300) {
+            // A broad advancing front is met by an elastic counterattack.
+            doctrineIndex = V4_DOCTRINES.indexOf('counterattack');
+            focusSector = 3;
+            commander.currentAdvisor = 'broad_advance_counterattack';
+          } else {
+            commander.currentAdvisor = 'network_plan';
+          }
+        }
+      }
       if (forcePursuit) {
         doctrineIndex = V4_DOCTRINES.indexOf('mass_assault');
         fireModeIndex = V4_FIRE_MODES.indexOf('independent');

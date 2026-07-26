@@ -18,6 +18,7 @@ SECTORS = 7
 STANCES = 5
 OUTPUTS = SECTORS + STANCES
 VERSION = 3
+LEAGUE = "crowd,neural,ppo,commander_v3,commander_v4,offensive,defensive,adaptive"
 
 
 class CommanderPolicy(nn.Module):
@@ -135,32 +136,31 @@ def save_policy(model, metadata):
     (ROOT / "trained-policy.js").write_text(source, encoding="utf8")
 
 
-def validate_policy(node, workers, trials, seed):
-    summary = {"wins": 0, "losses": 0, "draws": 0, "battles": 0}
-    for units in (100, 200, 400):
-        for neural_team in (0, 1):
-            blue, red = ("neural", "crowd") if neural_team == 0 else ("crowd", "neural")
-            command = [
-                node, str(ROOT / "diagnostic.js"),
-                "--blue", blue,
-                "--red", red,
-                "--units", str(units),
-                "--trials", str(trials),
-                "--workers", str(workers),
-                "--seed", str(seed + units * 97 + neural_team * 100003),
-                "--json",
-            ]
-            process = subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
-            result = json.loads(process.stdout)["results"][0]
-            neural_wins = result["blueWins"] if neural_team == 0 else result["redWins"]
-            crowd_wins = result["redWins"] if neural_team == 0 else result["blueWins"]
-            summary["wins"] += neural_wins
-            summary["losses"] += crowd_wins
-            summary["draws"] += result["draws"]
-            summary["battles"] += trials
-    summary["score"] = (
-        summary["wins"] + summary["draws"] * 0.5
-    ) / max(1, summary["battles"])
+def robust_score(summary):
+    rates = {}
+    for name, bucket in summary.get("byOpponent", {}).items():
+        games = bucket["wins"] + bucket["losses"] + bucket["draws"]
+        rates[name] = (bucket["wins"] + 0.5 * bucket["draws"]) / max(1, games)
+    overall = (summary["wins"] + 0.5 * summary["draws"]) / max(1, summary["battles"])
+    crowd = rates.get("crowd", overall)
+    worst = min(rates.values(), default=overall)
+    return 0.5 * overall + 0.3 * crowd + 0.2 * worst, rates
+
+
+def validate_policy(node, workers, battles, seed, opponents):
+    output = ROOT / ".training" / "neural-league-validation.json"
+    command = [
+        node, str(ROOT / "collect-rollouts.js"),
+        "--battles", str(battles),
+        "--workers", str(workers),
+        "--seed", str(seed),
+        "--opponents", opponents,
+        "--output", str(output),
+        "--evaluate",
+    ]
+    subprocess.run(command, cwd=ROOT, check=True)
+    summary = json.loads(output.read_text(encoding="utf8"))["summary"]
+    summary["score"], summary["rates"] = robust_score(summary)
     return summary
 
 
@@ -177,7 +177,8 @@ def main():
     parser.add_argument("--seed", type=int, default=94103)
     parser.add_argument("--node", default="node")
     parser.add_argument("--fresh", action="store_true")
-    parser.add_argument("--validation-trials", type=int, default=8)
+    parser.add_argument("--validation-trials", type=int, default=128)
+    parser.add_argument("--opponents", default=LEAGUE)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -201,6 +202,7 @@ def main():
             "--seed", str(args.seed + cycle * 104729),
             "--temperature", str(args.temperature * (0.9 ** cycle)),
             "--epsilon", str(max(0.06, args.epsilon * (0.88 ** cycle))),
+            "--opponents", args.opponents,
             "--output", str(rollout_path),
         ]
         subprocess.run(command, cwd=ROOT, check=True)
@@ -216,6 +218,7 @@ def main():
             args.workers,
             args.validation_trials,
             args.seed + 8_000_000 + cycle * 20011,
+            args.opponents,
         )
         cycle_result = {
             "cycle": cycle + 1,

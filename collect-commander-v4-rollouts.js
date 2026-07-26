@@ -14,7 +14,10 @@ function parseArgs(argv) {
     exploration: 0.12,
     output: '.training/commander-v4-rollouts.json',
     evaluate: false,
-    opponents: ['crowd']
+    opponents: ['crowd'],
+    forcedDoctrine: null,
+    forcedFocus: null,
+    forcedFire: null
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -25,6 +28,9 @@ function parseArgs(argv) {
     else if (arg === '--output') options.output = argv[++index];
     else if (arg === '--evaluate') options.evaluate = true;
     else if (arg === '--opponents') options.opponents = argv[++index].split(',').filter(Boolean);
+    else if (arg === '--forced-doctrine') options.forcedDoctrine = Number(argv[++index]);
+    else if (arg === '--forced-focus') options.forcedFocus = Number(argv[++index]);
+    else if (arg === '--forced-fire') options.forcedFire = Number(argv[++index]);
   }
   return options;
 }
@@ -52,7 +58,15 @@ function makeScenarios(count, seed, opponents) {
   return scenarios;
 }
 
-function collectChunk({ scenarios, policy, evaluate, exploration }) {
+function collectChunk({
+  scenarios,
+  policy,
+  evaluate,
+  exploration,
+  forcedDoctrine,
+  forcedFocus,
+  forcedFire
+}) {
   const samples = [];
   const summary = {
     battles: scenarios.length, wins: 0, losses: 0, draws: 0,
@@ -62,8 +76,18 @@ function collectChunk({ scenarios, policy, evaluate, exploration }) {
     const blue = scenario.v4Team === 0 ? 'commander_v4' : scenario.opponent;
     const red = scenario.v4Team === 1 ? 'commander_v4' : scenario.opponent;
     const policies = scenario.v4Team === 0 ? [policy, null] : [null, policy];
-    const recorder = { record: true, sample: true, exploration };
-    const training = evaluate
+    const recorder = {
+      record: !evaluate,
+      sample: !evaluate,
+      exploration,
+      forcedDoctrine,
+      forcedFocus,
+      forcedFire
+    };
+    const usesForcedPlan = Number.isInteger(forcedDoctrine)
+      || Number.isInteger(forcedFocus)
+      || Number.isInteger(forcedFire);
+    const training = evaluate && !usesForcedPlan
       ? [null, null]
       : scenario.v4Team === 0 ? [recorder, null] : [null, recorder];
     const result = new Battle({
@@ -109,7 +133,10 @@ async function main() {
         scenarios: chunk,
         policy,
         evaluate: options.evaluate,
-        exploration: options.exploration
+        exploration: options.exploration,
+        forcedDoctrine: options.forcedDoctrine,
+        forcedFocus: options.forcedFocus,
+        forcedFire: options.forcedFire
       }
     });
     worker.once('message', done);
